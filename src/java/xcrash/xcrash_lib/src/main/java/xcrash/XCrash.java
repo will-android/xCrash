@@ -26,7 +26,7 @@ import android.content.Context;
 import android.text.TextUtils;
 
 /**
- * xCrash is a crash reporting library for Android.
+ * xCrash is a crash reporting library for Android APP.
  */
 @SuppressWarnings("unused")
 public final class XCrash {
@@ -35,6 +35,7 @@ public final class XCrash {
     private static String appId = null;
     private static String appVersion = null;
     private static String logDir = null;
+    private static ILogger logger = new DefaultLogger();
 
     private XCrash() {
     }
@@ -61,7 +62,7 @@ public final class XCrash {
      * @param params An initialization parameter set.
      * @return Return zero if successful, non-zero otherwise. The error code is defined in: {@link xcrash.Errno}.
      */
-    @SuppressWarnings({"unused", "WeakerAccess"})
+    @SuppressWarnings("unused")
     public static synchronized int init(Context ctx, InitParameters params) {
         if (XCrash.initialized) {
             return Errno.OK;
@@ -82,54 +83,82 @@ public final class XCrash {
         if (params == null) {
             params = new InitParameters();
         }
-        if (TextUtils.isEmpty(params.appVersion)) {
-            params.appVersion = Util.getAppVersion(ctx);
-        }
-        if (TextUtils.isEmpty(params.logDir)) {
-            params.logDir = ctx.getFilesDir() + "/tombstones";
+
+        //set logger
+        if (params.logger != null) {
+            XCrash.logger = params.logger;
         }
 
+        //save app id
         XCrash.appId = ctx.getPackageName();
         if (TextUtils.isEmpty(XCrash.appId)) {
             XCrash.appId = "unknown";
         }
+
+        //save app version
+        if (TextUtils.isEmpty(params.appVersion)) {
+            params.appVersion = Util.getAppVersion(ctx);
+        }
         XCrash.appVersion = params.appVersion;
+
+        //save log dir
+        if (TextUtils.isEmpty(params.logDir)) {
+            params.logDir = ctx.getFilesDir() + "/tombstones";
+        }
         XCrash.logDir = params.logDir;
 
-        //java
+        //init file manager
+        FileManager.getInstance().initialize(
+            params.logDir,
+            params.javaLogCountMax,
+            params.nativeLogCountMax,
+            params.placeholderCountMax,
+            params.placeholderSizeKb,
+            params.logFileMaintainDelayMs);
+
+        //init java crash handler
         if (params.enableJavaCrashHandler) {
-            JavaCrashHandler.getInstance().initialize(ctx,
-                    appId,
-                    params.appVersion,
-                    params.logDir,
-                    params.javaLogCountMax,
-                    params.javaLogcatSystemLines,
-                    params.javaLogcatEventsLines,
-                    params.javaLogcatMainLines,
-                    params.javaDumpAllThreads,
-                    params.javaDumpAllThreadsCountMax,
-                    params.javaDumpAllThreadsWhiteList,
-                    params.javaCallback);
+            JavaCrashHandler.getInstance().initialize(
+                ctx,
+                appId,
+                params.appVersion,
+                params.logDir,
+                params.javaRethrow,
+                params.javaLogcatSystemLines,
+                params.javaLogcatEventsLines,
+                params.javaLogcatMainLines,
+                params.javaDumpAllThreads,
+                params.javaDumpAllThreadsCountMax,
+                params.javaDumpAllThreadsWhiteList,
+                params.javaCallback);
         }
 
-        //native
+        //init native crash handler
+        int r = Errno.OK;
         if (params.enableNativeCrashHandler) {
-            return NativeCrashHandler.getInstance().initialize(ctx,
-                    params.appVersion,
-                    params.logDir,
-                    params.nativeLogCountMax,
-                    params.nativeLogcatSystemLines,
-                    params.nativeLogcatEventsLines,
-                    params.nativeLogcatMainLines,
-                    params.nativeDumpMap,
-                    params.nativeDumpFds,
-                    params.nativeDumpAllThreads,
-                    params.nativeDumpAllThreadsCountMax,
-                    params.nativeDumpAllThreadsWhiteList,
-                    params.nativeCallback);
+            r = NativeCrashHandler.getInstance().initialize(
+                ctx,
+                appId,
+                params.appVersion,
+                params.logDir,
+                params.nativeRethrow,
+                params.nativeLogcatSystemLines,
+                params.nativeLogcatEventsLines,
+                params.nativeLogcatMainLines,
+                params.nativeDumpElfHash,
+                params.nativeDumpMap,
+                params.nativeDumpFds,
+                params.nativeDumpAllThreads,
+                params.nativeDumpAllThreadsCountMax,
+                params.nativeDumpAllThreadsWhiteList,
+                params.nativeCallback,
+                params.libLoader);
         }
 
-        return Errno.OK;
+        //maintain tombstone and placeholder files in a background thread with some delay
+        FileManager.getInstance().maintain();
+
+        return r;
     }
 
     /**
@@ -137,8 +166,11 @@ public final class XCrash {
      */
     public static class InitParameters {
         //common
-        String         appVersion             = null;
-        String         logDir                 = null;
+        String     appVersion             = null;
+        String     logDir                 = null;
+        int        logFileMaintainDelayMs = 5000;
+        ILogger    logger                 = null;
+        ILibLoader libLoader              = null;
 
         /**
          * Set App version. You can use this method to set an internal test/gray version number.
@@ -166,8 +198,73 @@ public final class XCrash {
             return this;
         }
 
+        /**
+         * Set delay in milliseconds before the log file maintain task is to be executed. (Default: 5000)
+         *
+         * @param logFileMaintainDelayMs Delay in milliseconds before the log file maintain task is to be executed.
+         * @return The InitParameters object.
+         */
+        @SuppressWarnings("unused")
+        public InitParameters setLogFileMaintainDelayMs(int logFileMaintainDelayMs) {
+            this.logFileMaintainDelayMs = (logFileMaintainDelayMs < 0 ? 0 : logFileMaintainDelayMs);
+            return this;
+        }
+
+        /**
+         * Set a logger implementation for xCrash to log message and exception.
+         *
+         * @param logger An instance of {@link xcrash.ILogger}.
+         * @return The InitParameters object.
+         */
+        public InitParameters setLogger(ILogger logger) {
+            this.logger = logger;
+            return this;
+        }
+
+        /**
+         * Set a libLoader implementation for xCrash to load native library.
+         *
+         * @param libLoader An instance of {@link xcrash.ILibLoader}.
+         * @return The InitParameters object.
+         */
+        public InitParameters setLibLoader(ILibLoader libLoader) {
+            this.libLoader = libLoader;
+            return this;
+        }
+
+        //placeholder
+        int placeholderCountMax = 0;
+        int placeholderSizeKb   = 128;
+
+        /**
+         * Set the maximum number of placeholder files in the log directory. (Default: 0)
+         *
+         * <p>Note: Set this value to 0 means disable the placeholder feature.
+         *
+         * @param countMax The maximum number of placeholder files.
+         * @return The InitParameters object.
+         */
+        @SuppressWarnings("unused")
+        public InitParameters setPlaceholderCountMax(int countMax) {
+            this.placeholderCountMax = (countMax < 0 ? 0 : countMax);
+            return this;
+        }
+
+        /**
+         * Set the KB of each placeholder files in the log directory. (Default: 128)
+         *
+         * @param sizeKb The KB of each placeholder files.
+         * @return The InitParameters object.
+         */
+        @SuppressWarnings("unused")
+        public InitParameters setPlaceholderSizeKb(int sizeKb) {
+            this.placeholderSizeKb = (sizeKb < 0 ? 0 : sizeKb);
+            return this;
+        }
+
         //java
         boolean        enableJavaCrashHandler      = true;
+        boolean        javaRethrow                 = true;
         int            javaLogCountMax             = 10;
         int            javaLogcatSystemLines       = 50;
         int            javaLogcatEventsLines       = 50;
@@ -178,7 +275,7 @@ public final class XCrash {
         ICrashCallback javaCallback                = null;
 
         /**
-         * Enable the Java exception capture mechanism. (Default: enable)
+         * Enable the Java exception capture feature. (Default: enable)
          *
          * @return The InitParameters object.
          */
@@ -189,13 +286,26 @@ public final class XCrash {
         }
 
         /**
-         * Disable the Java exception capture mechanism. (Default: enable)
+         * Disable the Java exception capture feature. (Default: enable)
          *
          * @return The InitParameters object.
          */
         @SuppressWarnings("unused")
         public InitParameters disableJavaCrashHandler() {
             this.enableJavaCrashHandler = false;
+            return this;
+        }
+
+        /**
+         * Set whether xCrash should rethrow the Java exception to system
+         * after it has been handled. (Default: true)
+         *
+         * @param rethrow If <code>true</code>, the Java exception will be rethrown to Android System.
+         * @return The InitParameters object.
+         */
+        @SuppressWarnings("unused")
+        public InitParameters setJavaRethrow(boolean rethrow) {
+            this.javaRethrow = rethrow;
             return this;
         }
 
@@ -207,7 +317,7 @@ public final class XCrash {
          */
         @SuppressWarnings("unused")
         public InitParameters setJavaLogCountMax(int countMax) {
-            this.javaLogCountMax = countMax;
+            this.javaLogCountMax = (countMax < 1 ? 1 : countMax);
             return this;
         }
 
@@ -248,25 +358,15 @@ public final class XCrash {
         }
 
         /**
-         * Enable dumping threads info (stacktrace) for all threads (not just the thread that has crashed)
+         * Set if dumping threads info (stacktrace) for all threads (not just the thread that has crashed)
          * when a Java exception occurred. (Default: enable)
          *
-         * @return The InitParameters object.
-         */
-        @SuppressWarnings({"unused", "WeakerAccess"})
-        public InitParameters enableJavaDumpAllThreads() {
-            this.javaDumpAllThreads = true;
-            return this;
-        }
-
-        /**
-         * Disable dumping threads info (stacktrace) for all threads when a Java exception occurred. (Default: enable)
-         *
+         * @param flag True or false.
          * @return The InitParameters object.
          */
         @SuppressWarnings("unused")
-        public InitParameters disableJavaDumpAllThreads() {
-            this.javaDumpAllThreads = false;
+        public InitParameters setJavaDumpAllThreads(boolean flag) {
+            this.javaDumpAllThreads = flag;
             return this;
         }
 
@@ -274,7 +374,7 @@ public final class XCrash {
          * Set the maximum number of other threads to dump when a Java exception occurred.
          * "0" means no limit. (Default: 0)
          *
-         * <p>Note: This option is only useful when "JavaDumpAllThreads" is enabled by calling {@link InitParameters#enableJavaDumpAllThreads()}.
+         * <p>Note: This option is only useful when "JavaDumpAllThreads" is enabled by calling {@link InitParameters#setJavaDumpAllThreads(boolean)}.
          *
          * @param countMax The maximum number of other threads to dump.
          * @return The InitParameters object.
@@ -289,7 +389,7 @@ public final class XCrash {
          * Set a thread name (regular expression) whitelist to filter which threads need to be dumped when a Java exception occurred.
          * "null" means no filtering. (Default: null)
          *
-         * <p>Note: This option is only useful when "JavaDumpAllThreads" is enabled by calling {@link InitParameters#enableJavaDumpAllThreads()}.
+         * <p>Note: This option is only useful when "JavaDumpAllThreads" is enabled by calling {@link InitParameters#setJavaDumpAllThreads(boolean)}.
          *
          * @param whiteList A thread name (regular expression) whitelist.
          * @return The InitParameters object.
@@ -314,10 +414,12 @@ public final class XCrash {
 
         //native
         boolean        enableNativeCrashHandler      = true;
+        boolean        nativeRethrow                 = true;
         int            nativeLogCountMax             = 10;
         int            nativeLogcatSystemLines       = 50;
         int            nativeLogcatEventsLines       = 50;
         int            nativeLogcatMainLines         = 200;
+        boolean        nativeDumpElfHash             = true;
         boolean        nativeDumpMap                 = true;
         boolean        nativeDumpFds                 = true;
         boolean        nativeDumpAllThreads          = true;
@@ -326,7 +428,7 @@ public final class XCrash {
         ICrashCallback nativeCallback                = null;
 
         /**
-         * Enable the native crash capture mechanism. (Default: enable)
+         * Enable the native crash capture feature. (Default: enable)
          *
          * @return The InitParameters object.
          */
@@ -337,13 +439,26 @@ public final class XCrash {
         }
 
         /**
-         * Disable the native crash capture mechanism. (Default: enable)
+         * Disable the native crash capture feature. (Default: enable)
          *
          * @return The InitParameters object.
          */
         @SuppressWarnings("unused")
         public InitParameters disableNativeCrashHandler() {
             this.enableNativeCrashHandler = false;
+            return this;
+        }
+
+        /**
+         * Set whether xCrash should rethrow the native signal to system
+         * after it has been handled. (Default: true)
+         *
+         * @param rethrow If <code>true</code>, the native signal will be rethrown to Android System.
+         * @return The InitParameters object.
+         */
+        @SuppressWarnings("unused")
+        public InitParameters setNativeRethrow(boolean rethrow) {
+            this.nativeRethrow = rethrow;
             return this;
         }
 
@@ -355,7 +470,7 @@ public final class XCrash {
          */
         @SuppressWarnings("unused")
         public InitParameters setNativeLogCountMax(int countMax) {
-            this.nativeLogCountMax = countMax;
+            this.nativeLogCountMax = (countMax < 1 ? 1 : countMax);
             return this;
         }
 
@@ -396,69 +511,51 @@ public final class XCrash {
         }
 
         /**
-         * Enable dumping memory map when a native crash occurred. (Default: enable)
+         * Set if dumping ELF file's MD5 hash in Build-Id section when a native crash occurred. (Default: enable)
          *
+         * @param flag True or false.
          * @return The InitParameters object.
          */
         @SuppressWarnings("unused")
-        public InitParameters enableNativeDumpMap() {
-            this.nativeDumpMap = true;
+        public InitParameters setNativeDumpElfHash(boolean flag) {
+            this.nativeDumpElfHash = flag;
             return this;
         }
 
         /**
-         * Disable dumping memory map when a native crash occurred. (Default: enable)
+         * Set if dumping memory map when a native crash occurred. (Default: enable)
          *
+         * @param flag True or false.
          * @return The InitParameters object.
          */
         @SuppressWarnings("unused")
-        public InitParameters disableNativeDumpMap() {
-            this.nativeDumpMap = false;
+        public InitParameters setNativeDumpMap(boolean flag) {
+            this.nativeDumpMap = flag;
             return this;
         }
 
         /**
-         * Enable dumping FD list when a native crash occurred. (Default: enable)
+         * Set if dumping FD list when a native crash occurred. (Default: enable)
          *
+         * @param flag True or false.
          * @return The InitParameters object.
          */
         @SuppressWarnings("unused")
-        public InitParameters enableNativeDumpFds() {
-            this.nativeDumpFds = true;
+        public InitParameters setNativeDumpFds(boolean flag) {
+            this.nativeDumpFds = flag;
             return this;
         }
 
         /**
-         * Disable dumping FD list when a native crash occurred. (Default: enable)
-         *
-         * @return The InitParameters object.
-         */
-        @SuppressWarnings("unused")
-        public InitParameters disableNativeDumpFds() {
-            this.nativeDumpFds = false;
-            return this;
-        }
-
-        /**
-         * Enable dumping threads info (registers, backtrace and stack) for all threads (not just the thread that has crashed)
+         * Set if dumping threads info (registers, backtrace and stack) for all threads (not just the thread that has crashed)
          * when a native crash occurred. (Default: enable)
          *
+         * @param flag True or false.
          * @return The InitParameters object.
          */
-        @SuppressWarnings({"unused", "WeakerAccess"})
-        public InitParameters enableNativeDumpAllThreads() {
-            this.nativeDumpAllThreads = true;
-            return this;
-        }
-
-        /**
-         * Disable dumping threads info (registers, backtrace and stack) for all threads when a native crash occurred. (Default: enable)
-         *
-         * @return The InitParameters object.
-         */
-        @SuppressWarnings("unused")
-        public InitParameters disableNativeDumpAllThreads() {
-            this.nativeDumpAllThreads = false;
+        @SuppressWarnings({"unused"})
+        public InitParameters setNativeDumpAllThreads(boolean flag) {
+            this.nativeDumpAllThreads = flag;
             return this;
         }
 
@@ -466,7 +563,7 @@ public final class XCrash {
          * Set the maximum number of other threads to dump when a native crash occurred.
          * "0" means no limit. (Default: 0)
          *
-         * <p>Note: This option is only useful when "NativeDumpAllThreads" is enabled by calling {@link InitParameters#enableNativeDumpAllThreads()}.
+         * <p>Note: This option is only useful when "NativeDumpAllThreads" is enabled by calling {@link InitParameters#setNativeDumpAllThreads(boolean)}.
          *
          * @param countMax The maximum number of other threads to dump.
          * @return The InitParameters object.
@@ -481,7 +578,7 @@ public final class XCrash {
          * Set a thread name (regular expression) whitelist to filter which threads need to be dumped when a native crash occurred.
          * "null" means no filtering. (Default: null)
          *
-         * <p>Note: This option is only useful when "NativeDumpAllThreads" is enabled by calling {@link InitParameters#enableNativeDumpAllThreads()}.
+         * <p>Note: This option is only useful when "NativeDumpAllThreads" is enabled by calling {@link InitParameters#setNativeDumpAllThreads(boolean)}.
          *
          * <p>Warning: The regular expression used here only supports POSIX ERE (Extended Regular Expression).
          * Android bionic's regular expression is different from Linux libc's regular expression.
@@ -519,6 +616,10 @@ public final class XCrash {
 
     static String getLogDir() {
         return logDir;
+    }
+
+    static ILogger getLogger() {
+        return logger;
     }
 
     /**

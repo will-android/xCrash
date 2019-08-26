@@ -35,6 +35,8 @@
 #include "xcd_memory.h"
 #include "xcd_log.h"
 
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wpadded"
 struct xcd_elf
 {
     pid_t                pid;
@@ -44,6 +46,7 @@ struct xcd_elf
     xcd_elf_interface_t *gnu_interface;
     int                  gnu_interface_created;
 };
+#pragma clang diagnostic pop
 
 int xcd_elf_is_valid(xcd_memory_t *memory)
 {
@@ -102,12 +105,16 @@ xcd_memory_t *xcd_elf_get_memory(xcd_elf_t *self)
     return self->memory;
 }
 
-int xcd_elf_step(xcd_elf_t *self, uintptr_t rel_pc, uintptr_t step_pc, xcd_regs_t *regs, int *finished)
+int xcd_elf_step(xcd_elf_t *self, uintptr_t rel_pc, uintptr_t step_pc, xcd_regs_t *regs, int *finished, int *sigreturn)
 {
+    *finished = 0;
+    *sigreturn = 0;
+    
     //try sigreturn
     if(0 == xcd_regs_try_step_sigreturn(regs, rel_pc, self->memory, self->pid))
     {
         *finished = 0;
+        *sigreturn = 1;
 #if XCD_ELF_DEBUG
         XCD_LOG_DEBUG("ELF: step by sigreturn OK, rel_pc=%"PRIxPTR", finished=0", rel_pc);
 #endif
@@ -157,7 +164,12 @@ int xcd_elf_get_function_info(xcd_elf_t *self, uintptr_t addr, char **name, size
     if(NULL != self->gnu_interface)
         if(0 == (r = xcd_elf_interface_get_function_info(self->gnu_interface, addr, name, name_offset))) return 0;
 
-    return r;    
+    return r;
+}
+
+int xcd_elf_get_symbol_addr(xcd_elf_t *self, const char *name, uintptr_t *addr)
+{
+    return xcd_elf_interface_get_symbol_addr(self->interface, name, addr);
 }
 
 int xcd_elf_get_build_id(xcd_elf_t *self, uint8_t *build_id, size_t build_id_len, size_t *build_id_len_ret)

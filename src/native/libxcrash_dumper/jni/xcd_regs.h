@@ -27,7 +27,6 @@
 #include <stdint.h>
 #include <sys/types.h>
 #include <ucontext.h>
-#include "xcd_recorder.h"
 #include "xcd_memory.h"
 
 #ifdef __cplusplus
@@ -48,9 +47,12 @@ extern "C" {
 #define XCD_REGS_MACHINE_NUM 17
 #endif
 
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wpadded"
 typedef struct {
     uintptr_t r[XCD_REGS_USER_NUM];
 } xcd_regs_t;
+#pragma clang diagnostic pop
 
 uintptr_t xcd_regs_get_pc(xcd_regs_t *self);
 void xcd_regs_set_pc(xcd_regs_t *self, uintptr_t pc);
@@ -58,17 +60,20 @@ void xcd_regs_set_pc(xcd_regs_t *self, uintptr_t pc);
 uintptr_t xcd_regs_get_sp(xcd_regs_t *self);
 void xcd_regs_set_sp(xcd_regs_t *self, uintptr_t sp);
 
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wpadded"
 typedef struct {
     uint8_t     idx;
     const char *name;
 } xcd_regs_label_t;
+#pragma clang diagnostic pop
 
 void xcd_regs_get_labels(xcd_regs_label_t **labels, size_t *labels_count);
 
 void xcd_regs_load_from_ucontext(xcd_regs_t *self, ucontext_t *uc);
 void xcd_regs_load_from_ptregs(xcd_regs_t *self, uintptr_t *regs, size_t regs_len);
 
-int xcd_regs_record(xcd_regs_t *self, xcd_recorder_t *recorder);
+int xcd_regs_record(xcd_regs_t *self, int log_fd);
 
 int xcd_regs_try_step_sigreturn(xcd_regs_t *self, uintptr_t rel_pc, xcd_memory_t *memory, pid_t pid);
 

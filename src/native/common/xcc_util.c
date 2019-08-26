@@ -29,6 +29,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <fcntl.h>
+#include <sys/ptrace.h>
 #include <sys/types.h>
 #include <sys/stat.h>
 #include <sys/utsname.h>
@@ -36,6 +37,9 @@
 #include "xcc_errno.h"
 #include "xcc_fmt.h"
 #include "xcc_util.h"
+
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wgnu-statement-expression"
 
 const char* xcc_util_get_signame(const siginfo_t* si)
 {
@@ -46,6 +50,8 @@ const char* xcc_util_get_signame(const siginfo_t* si)
     case SIGFPE:    return "SIGFPE";
     case SIGILL:    return "SIGILL";
     case SIGSEGV:   return "SIGSEGV";
+    case SIGTRAP:   return "SIGTRAP";
+    case SIGSYS:    return "SIGSYS";
     case SIGSTKFLT: return "SIGSTKFLT";
     default:        return "?";
     }
@@ -56,7 +62,7 @@ const char* xcc_util_get_sigcodename(const siginfo_t* si)
     // Try the signal-specific codes...
     switch (si->si_signo) {
     case SIGBUS:
-        switch (si->si_code)
+        switch(si->si_code)
         {
         case BUS_ADRALN:    return "BUS_ADRALN";
         case BUS_ADRERR:    return "BUS_ADRERR";
@@ -67,7 +73,7 @@ const char* xcc_util_get_sigcodename(const siginfo_t* si)
         }
         break;
     case SIGFPE:
-        switch (si->si_code)
+        switch(si->si_code)
         {
         case FPE_INTDIV:   return "FPE_INTDIV";
         case FPE_INTOVF:   return "FPE_INTOVF";
@@ -81,7 +87,7 @@ const char* xcc_util_get_sigcodename(const siginfo_t* si)
         }
         break;
     case SIGILL:
-        switch (si->si_code)
+        switch(si->si_code)
         {
         case ILL_ILLOPC:   return "ILL_ILLOPC";
         case ILL_ILLOPN:   return "ILL_ILLOPN";
@@ -95,13 +101,45 @@ const char* xcc_util_get_sigcodename(const siginfo_t* si)
         }
         break;
     case SIGSEGV:
-        switch (si->si_code)
+        switch(si->si_code)
         {
         case SEGV_MAPERR:  return "SEGV_MAPERR";
         case SEGV_ACCERR:  return "SEGV_ACCERR";
         case SEGV_BNDERR:  return "SEGV_BNDERR";
         case SEGV_PKUERR:  return "SEGV_PKUERR";
         default:           break;
+        }
+        break;
+    case SIGTRAP:
+        switch(si->si_code)
+        {
+        case TRAP_BRKPT:   return "TRAP_BRKPT";
+        case TRAP_TRACE:   return "TRAP_TRACE";
+        case TRAP_BRANCH:  return "TRAP_BRANCH";
+        case TRAP_HWBKPT:  return "TRAP_HWBKPT";
+        default:           break;
+        }
+        if((si->si_code & 0xff) == SIGTRAP)
+        {
+            switch((si->si_code >> 8) & 0xff)
+            {
+            case PTRACE_EVENT_FORK:       return "PTRACE_EVENT_FORK";
+            case PTRACE_EVENT_VFORK:      return "PTRACE_EVENT_VFORK";
+            case PTRACE_EVENT_CLONE:      return "PTRACE_EVENT_CLONE";
+            case PTRACE_EVENT_EXEC:       return "PTRACE_EVENT_EXEC";
+            case PTRACE_EVENT_VFORK_DONE: return "PTRACE_EVENT_VFORK_DONE";
+            case PTRACE_EVENT_EXIT:       return "PTRACE_EVENT_EXIT";
+            case PTRACE_EVENT_SECCOMP:    return "PTRACE_EVENT_SECCOMP";
+            case PTRACE_EVENT_STOP:       return "PTRACE_EVENT_STOP";
+            default:                      break;
+            }
+        }
+        break;
+    case SIGSYS:
+        switch(si->si_code)
+        {
+        case SYS_SECCOMP: return "SYS_SECCOMP";
+        default:          break;
         }
         break;
     default:
@@ -128,7 +166,7 @@ const char* xcc_util_get_sigcodename(const siginfo_t* si)
 int xcc_util_signal_has_si_addr(const siginfo_t* si)
 {
     //manually sent signals won't have si_addr
-    if (si->si_code == SI_USER || si->si_code == SI_QUEUE || si->si_code == SI_TKILL) return 0;
+    if(si->si_code == SI_USER || si->si_code == SI_QUEUE || si->si_code == SI_TKILL) return 0;
 
     switch (si->si_signo)
     {
@@ -206,6 +244,8 @@ int xcc_util_write(int fd, const char *buf, size_t len)
     ssize_t     nwritten;
     const char *ptr;
 
+    if(fd < 0) return XCC_ERRNO_INVAL;
+
     ptr   = buf;
     nleft = len;
 
@@ -220,7 +260,7 @@ int xcc_util_write(int fd, const char *buf, size_t len)
                 return XCC_ERRNO_SYS;    /* error */
         }
 
-        nleft -= nwritten;
+        nleft -= (size_t)nwritten;
         ptr   += nwritten;
     }
 
@@ -232,8 +272,10 @@ int xcc_util_write_str(int fd, const char *str)
     const char *tmp = str;
     size_t      len = 0;
 
+    if(fd < 0) return XCC_ERRNO_INVAL;
+    
     while(*tmp) tmp++;
-    len = tmp - str;
+    len = (size_t)(tmp - str);
     if(0 == len) return 0;
 
     return xcc_util_write(fd, str, len);
@@ -245,15 +287,39 @@ int xcc_util_write_format(int fd, const char *format, ...)
     char    buf[1024];
     ssize_t len;
 
+    if(fd < 0) return XCC_ERRNO_INVAL;
+    
+    va_start(ap, format);
+    
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wformat-nonliteral"
+    len = vsnprintf(buf, sizeof(buf), format, ap);
+#pragma clang diagnostic pop
+    
+    va_end(ap);
+    
+    if(len <= 0) return 0;
+    
+    return xcc_util_write(fd, buf, (size_t)len);
+}
+
+int xcc_util_write_format_safe(int fd, const char *format, ...)
+{
+    va_list ap;
+    char    buf[1024];
+    size_t  len;
+
+    if(fd < 0) return XCC_ERRNO_INVAL;
+    
     va_start(ap, format);
     len = xcc_fmt_vsnprintf(buf, sizeof(buf), format, ap);
     va_end(ap);
-    if(len <= 0) return 0;
+    if(0 == len) return 0;
     
     return xcc_util_write(fd, buf, len);
 }
 
-char *xcc_util_gets(char *s, int size, int fd)
+char *xcc_util_gets(char *s, size_t size, int fd)
 {
     ssize_t i, nread;
     char    c, *p;
@@ -263,7 +329,7 @@ char *xcc_util_gets(char *s, int size, int fd)
     s[0] = '\0';
     p = s;
     
-    for(i = 0; i < size - 1; i++)
+    for(i = 0; i < (ssize_t)(size - 1); i++)
     {
         if(1 == (nread = read(fd, &c, 1)))
         {
@@ -289,7 +355,7 @@ int xcc_util_read_file_line(const char *path, char *buf, size_t len)
     int fd = -1;
     int r = 0;
     
-    if(0 > (fd = TEMP_FAILURE_RETRY(open(path, O_RDONLY | O_CLOEXEC))))
+    if(0 > (fd = XCC_UTIL_TEMP_FAILURE_RETRY(open(path, O_RDONLY | O_CLOEXEC))))
     {
         r = XCC_ERRNO_SYS;
         goto end;
@@ -305,22 +371,43 @@ int xcc_util_read_file_line(const char *path, char *buf, size_t len)
     return r;
 }
 
+static int xcc_util_get_process_thread_name(const char *path, char *buf, size_t len)
+{
+    char    tmp[256], *data;
+    size_t  data_len, cpy_len;
+    int     r;
+
+    //read a line
+    if(0 != (r = xcc_util_read_file_line(path, tmp, sizeof(tmp)))) return r;
+
+    //trim
+    data = xcc_util_trim(tmp);
+
+    //return data
+    if(0 == (data_len = strlen(data))) return XCC_ERRNO_MISSING;
+    cpy_len = XCC_UTIL_MIN(len - 1, data_len);
+    memcpy(buf, data, cpy_len);
+    buf[cpy_len] = '\0';
+
+    return 0;
+}
+
 int xcc_util_get_process_name(pid_t pid, char *buf, size_t len)
 {
     char path[128];
-    
+
     xcc_fmt_snprintf(path, sizeof(path), "/proc/%d/cmdline", pid);
     
-    return xcc_util_read_file_line(path, buf, len);
+    return xcc_util_get_process_thread_name(path, buf, len);
 }
-    
+
 int xcc_util_get_thread_name(pid_t tid, char *buf, size_t len)
 {
     char path[128];
     
     xcc_fmt_snprintf(path, sizeof(path), "/proc/%d/comm", tid);
     
-    return xcc_util_read_file_line(path, buf, len);
+    return xcc_util_get_process_thread_name(path, buf, len);
 }
 
 static const char *xcc_util_su_pathnames[] =
@@ -338,7 +425,7 @@ static const char *xcc_util_su_pathnames[] =
     "/su/bin/su"
 };
 
-int xcc_util_is_root()
+int xcc_util_is_root(void)
 {
     size_t i;
     for(i = 0; i < sizeof(xcc_util_su_pathnames) / sizeof(xcc_util_su_pathnames[0]); i++)
@@ -410,7 +497,7 @@ void xcc_util_load_build_prop(xcc_util_build_prop_t *prop)
     char    buf[256];
     char   *abi = NULL;
     char   *abi2 = NULL;
-    size_t  len;
+    size_t  len = 0;
 
     memset(prop, 0, sizeof(xcc_util_build_prop_t));
 
@@ -448,7 +535,7 @@ void xcc_util_load_build_prop(xcc_util_build_prop_t *prop)
     //build abi_list from abi and abi2
     if(NULL == prop->abi_list && (NULL != abi || NULL != abi2))
     {
-        if(NULL != abi)  len = snprintf(buf, sizeof(buf), "%s", abi);
+        if(NULL != abi)  len = (size_t)snprintf(buf, sizeof(buf), "%s", abi);
         if(NULL != abi2) snprintf(buf + len, sizeof(buf) - len, ",%s", abi2);
         prop->abi_list = strdup(buf);
     }
@@ -479,3 +566,19 @@ void xcc_util_get_kernel_version(char *buf, size_t len)
 
     snprintf(buf, len, "%s version %s %s (%s)", uts.sysname, uts.release, uts.version, uts.machine);
 }
+
+int xcc_util_ends_with(const char *str, const char *suffix)
+{
+    size_t str_len, suffix_len;
+    
+    if(NULL == str || NULL == suffix) return 0;
+
+    str_len = strlen(str);
+    suffix_len = strlen(suffix);
+    if(str_len < suffix_len) return 0;
+
+    return (0 == memcmp((const void *)(str + str_len - suffix_len), (const void *)suffix, suffix_len) ? 1 : 0);
+}
+
+
+#pragma clang diagnostic pop

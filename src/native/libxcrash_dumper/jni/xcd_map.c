@@ -28,7 +28,6 @@
 #include "xcc_errno.h"
 #include "xcc_util.h"
 #include "xcd_map.h"
-#include "xcd_recorder.h"
 #include "xcd_util.h"
 #include "xcd_log.h"
 
@@ -95,4 +94,12 @@ uintptr_t xcd_map_get_rel_pc(xcd_map_t *self, uintptr_t pc, pid_t pid, void *map
     uintptr_t load_bias = (NULL == elf ? 0 : xcd_elf_get_load_bias(elf));
     
     return pc - self->start + load_bias + self->elf_offset;
+}
+
+uintptr_t xcd_map_get_abs_pc(xcd_map_t *self, uintptr_t pc, pid_t pid, void *maps_obj)
+{
+    xcd_elf_t *elf = xcd_map_get_elf(self, pid, maps_obj);
+    uintptr_t load_bias = (NULL == elf ? 0 : xcd_elf_get_load_bias(elf));
+    
+    return self->start + pc - load_bias - self->elf_offset;
 }

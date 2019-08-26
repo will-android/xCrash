@@ -35,9 +35,9 @@ extern "C" {
 typedef void (* xcc_signal_handler_t)(int, siginfo_t *, void *);
 
 int xcc_signal_register(xcc_signal_handler_t handler);
-int xcc_signal_unregister();
-int xcc_signal_ignore();
-void xcc_signal_raise(int sig);
+int xcc_signal_unregister(void);
+int xcc_signal_ignore(void);
+int xcc_signal_resend(siginfo_t* si);
 
 #ifdef __cplusplus
 }

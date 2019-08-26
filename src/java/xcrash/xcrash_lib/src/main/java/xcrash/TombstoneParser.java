@@ -30,10 +30,13 @@ import java.io.File;
 import java.io.FileReader;
 import java.io.IOException;
 import java.io.StringReader;
+import java.text.DateFormat;
+import java.text.SimpleDateFormat;
 import java.util.Arrays;
 import java.util.Date;
 import java.util.HashMap;
 import java.util.HashSet;
+import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
 import java.util.regex.Matcher;
@@ -227,6 +230,12 @@ public class TombstoneParser {
     public static final String keyFaultAddr = "fault addr";
 
     /**
+     * Native crash abort message.
+     */
+    @SuppressWarnings("WeakerAccess")
+    public static final String keyAbortMessage = "Abort message";
+
+    /**
      * Native crash registers values.
      */
     @SuppressWarnings("WeakerAccess")
@@ -239,7 +248,7 @@ public class TombstoneParser {
     public static final String keyBacktrace = "backtrace";
 
     /**
-     * Native crash backtrace's library build-id.
+     * Native crash ELF's build-id and file size.
      */
     @SuppressWarnings("WeakerAccess")
     public static final String keyBuildId = "build id";
@@ -307,7 +316,7 @@ public class TombstoneParser {
     private static final Pattern patHeadItem = Pattern.compile("^(.*):\\s'(.*?)'$");
     private static final Pattern patProcessThread = Pattern.compile("^pid:\\s(.*),\\stid:\\s(.*),\\sname:\\s(.*)\\s+>>>\\s(.*)\\s<<<$");
     private static final Pattern patSignalCode = Pattern.compile("^signal\\s(.*),\\scode\\s(.*),\\sfault\\saddr\\s(.*)$");
-    private static final Pattern patAppVersionProcessName = Pattern.compile("^_(\\d{20})_(.*)__(.*)$");
+    private static final Pattern patAppVersionProcessName = Pattern.compile("^(\\d{20})_(.*)__(.*)$");
 
     private static final Set<String> keyHeadItems = new HashSet<String>(Arrays.asList(
         keyTombstoneMaker,
@@ -332,7 +341,8 @@ public class TombstoneParser {
         keyModel,
         keyBuildFingerprint,
         keyRevision,
-        keyAbi
+        keyAbi,
+        keyAbortMessage
     ));
 
     private static final Set<String> keySections = new HashSet<String>(Arrays.asList(
@@ -362,9 +372,10 @@ public class TombstoneParser {
      *
      * @param log Object of the crash log file.
      * @return The parsed map.
+     * @throws IOException If an I/O error occurs.
      */
     @SuppressWarnings("unused")
-    public static Map<String, String> parse(File log) {
+    public static Map<String, String> parse(File log) throws IOException {
         return parse(log.getAbsolutePath(), null);
     }
 
@@ -374,9 +385,10 @@ public class TombstoneParser {
      *
      * @param logPath Absolute path of the crash log file.
      * @return The parsed map.
+     * @throws IOException If an I/O error occurs.
      */
     @SuppressWarnings("unused")
-    public static Map<String, String> parse(String logPath) {
+    public static Map<String, String> parse(String logPath) throws IOException {
         return parse(logPath, null);
     }
 
@@ -389,46 +401,25 @@ public class TombstoneParser {
      * @param logPath Absolute path of the crash log file.
      * @param emergency A buffer that holds basic crash information when disk exhausted.
      * @return The parsed map.
+     * @throws IOException If an I/O error occurs.
      */
-    @SuppressWarnings({"unused", "WeakerAccess"})
-    public static Map<String, String> parse(String logPath, String emergency) {
+    @SuppressWarnings("unused")
+    public static Map<String, String> parse(String logPath, String emergency) throws IOException {
 
         Map<String, String> map = new HashMap<String, String>();
-        BufferedReader br = null;
 
         //parse content from log file
         if (logPath != null) {
-            try {
-                br = new BufferedReader(new FileReader(logPath));
-                parseFromReader(map, br);
-            } catch (Exception e) {
-                e.printStackTrace();
-            } finally {
-                if (br != null) {
-                    try {
-                        br.close();
-                    } catch (Exception ignored) {
-                    }
-                    br = null;
-                }
-            }
+            BufferedReader br = new BufferedReader(new FileReader(logPath));
+            parseFromReader(map, br, true);
+            br.close();
         }
 
         //parse content from emergency buffer
         if (emergency != null) {
-            try {
-                br = new BufferedReader(new StringReader(emergency));
-                parseFromReader(map, br);
-            } catch (Exception e) {
-                e.printStackTrace();
-            } finally {
-                if (br != null) {
-                    try {
-                        br.close();
-                    } catch (Exception ignored) {
-                    }
-                }
-            }
+            BufferedReader br = new BufferedReader(new StringReader(emergency));
+            parseFromReader(map, br, false);
+            br.close();
         }
 
         //try to parse APP version, process name, crash type, start time and crash time from log path
@@ -454,7 +445,8 @@ public class TombstoneParser {
 
         //add crash time
         if (TextUtils.isEmpty(map.get(keyCrashTime))) {
-            map.put(keyCrashTime, Util.timeFormatter.format(new Date(new File(logPath).lastModified())));
+            DateFormat timeFormatter = new SimpleDateFormat(Util.timeFormatterStr, Locale.US);
+            map.put(keyCrashTime, timeFormatter.format(new Date(new File(logPath).lastModified())));
         }
 
         String startTime = map.get(keyStartTime);
@@ -472,8 +464,8 @@ public class TombstoneParser {
             if (filename.isEmpty()) return;
 
             //ignore prefix
-            if (!filename.startsWith(Util.logPrefix)) return;
-            filename = filename.substring(Util.logPrefix.length());
+            if (!filename.startsWith(Util.logPrefix + "_")) return;
+            filename = filename.substring(Util.logPrefix.length() + 1);
 
             //ignore suffix, save crash type
             if (filename.endsWith(Util.javaLogSuffix)) {
@@ -496,7 +488,8 @@ public class TombstoneParser {
                 if (matcher.find() && matcher.groupCount() == 3) {
                     if (TextUtils.isEmpty(startTime)) {
                         long crashTimeLong = Long.parseLong(matcher.group(1), 10) / 1000;
-                        map.put(keyStartTime, Util.timeFormatter.format(new Date(crashTimeLong)));
+                        DateFormat timeFormatter = new SimpleDateFormat(Util.timeFormatterStr, Locale.US);
+                        map.put(keyStartTime, timeFormatter.format(new Date(crashTimeLong)));
                     }
                     if (TextUtils.isEmpty(appVersion)) {
                         map.put(keyAppVersion, matcher.group(2));
@@ -552,7 +545,36 @@ public class TombstoneParser {
         }
     }
 
-    private static void parseFromReader(Map<String, String> map, BufferedReader br) throws IOException {
+    private static String readLineInBinary(BufferedReader br) throws IOException {
+
+        // Peek the next 2 characters to determine if there is still valid text.
+
+        try {
+            br.mark(2);
+        } catch (Exception ignored) {
+            return br.readLine();
+        }
+
+        try {
+            for (int i = 0; i < 2; i++) {
+                int c = br.read();
+                if (c == -1) {
+                    br.reset();
+                    return null;
+                } else if (c > 0) {
+                    br.reset();
+                    return br.readLine();
+                }
+            }
+            br.reset();
+            return null;
+        } catch (Exception ignored) {
+            br.reset();
+            return br.readLine();
+        }
+    }
+
+    private static void parseFromReader(Map<String, String> map, BufferedReader br, boolean binary) throws IOException {
         String next, line;
         String sectionTitle = null;
         StringBuilder sectionContent = new StringBuilder();
@@ -562,9 +584,9 @@ public class TombstoneParser {
         Matcher matcher;
         Status status = Status.UNKNOWN;
 
-        line = br.readLine();
+        line = (binary ? readLineInBinary(br) : br.readLine());
         for (boolean last = (line == null); !last; line = next) {
-            last = ((next = br.readLine()) == null);
+            last = ((next = (binary ? readLineInBinary(br) : br.readLine())) == null);
             switch (status) {
                 case UNKNOWN:
                     if (line.equals(Util.sepHead)) {
@@ -623,15 +645,6 @@ public class TombstoneParser {
                             putKeyValue(map, keySignal, matcher.group(1));
                             putKeyValue(map, keyCode, matcher.group(2));
                             putKeyValue(map, keyFaultAddr, matcher.group(3));
-
-                            //special case
-                            if (next != null && (next.startsWith("    r0 ") || next.startsWith("    x0 ") || next.startsWith("    eax ") || next.startsWith("    rax "))) {
-                                status = Status.SECTION;
-                                sectionTitle = keyRegisters;
-                                sectionContentEnding = "";
-                                sectionContentOutdent = true;
-                                sectionContentAppend = false;
-                            }
                         }
                     } else {
                         //other items in head section
@@ -641,6 +654,16 @@ public class TombstoneParser {
                                 putKeyValue(map, matcher.group(1), matcher.group(2));
                             }
                         }
+                    }
+
+                    //special case
+                    if (next != null && (next.startsWith("    r0 ") || next.startsWith("    x0 ") || next.startsWith("    eax ") || next.startsWith("    rax "))) {
+                        //registers
+                        status = Status.SECTION;
+                        sectionTitle = keyRegisters;
+                        sectionContentEnding = "";
+                        sectionContentOutdent = true;
+                        sectionContentAppend = false;
                     }
 
                     if (next == null || next.isEmpty()) {

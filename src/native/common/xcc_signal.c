@@ -24,20 +24,24 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <unistd.h>
+#include <string.h>
 #include <inttypes.h>
 #include <errno.h>
 #include <signal.h>
-#include <android/log.h>
+#include <sys/syscall.h>
 #include "xcc_signal.h"
 #include "xcc_errno.h"
 
-#define XCC_SIGNAL_STACK_SIZE (1024 * 16)
+#define XCC_SIGNAL_STACK_SIZE (1024 * 128)
 
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wpadded"
 typedef struct
 {
     int              signum;
     struct sigaction orig_act;
 } xcc_signal_info_t;
+#pragma clang diagnostic pop
 
 static xcc_signal_info_t xcc_signal_info[] =
 {
@@ -46,21 +50,24 @@ static xcc_signal_info_t xcc_signal_info[] =
     {.signum = SIGFPE},
     {.signum = SIGILL},
     {.signum = SIGSEGV},
+    {.signum = SIGTRAP},
+    {.signum = SIGSYS},
     {.signum = SIGSTKFLT}
 };
 
 int xcc_signal_register(xcc_signal_handler_t handler)
 {
     stack_t ss;
-    if(NULL == (ss.ss_sp = malloc(XCC_SIGNAL_STACK_SIZE))) return XCC_ERRNO_NOMEM;
+    if(NULL == (ss.ss_sp = calloc(1, XCC_SIGNAL_STACK_SIZE))) return XCC_ERRNO_NOMEM;
     ss.ss_size  = XCC_SIGNAL_STACK_SIZE;
     ss.ss_flags = 0;
     if(0 != sigaltstack(&ss, NULL)) return XCC_ERRNO_SYS;
 
     struct sigaction act;
-    act.sa_flags = SA_SIGINFO | SA_ONSTACK;
+    memset(&act, 0, sizeof(act));
+    sigfillset(&act.sa_mask);
     act.sa_sigaction = handler;
-    if(0 != sigemptyset(&act.sa_mask)) return XCC_ERRNO_SYS;
+    act.sa_flags = SA_RESTART | SA_SIGINFO | SA_ONSTACK;
     
     size_t i;
     for(i = 0; i < sizeof(xcc_signal_info) / sizeof(xcc_signal_info[0]); i++)
@@ -70,7 +77,7 @@ int xcc_signal_register(xcc_signal_handler_t handler)
     return 0;
 }
 
-int xcc_signal_unregister()
+int xcc_signal_unregister(void)
 {
     int r = 0;
     size_t i;
@@ -81,12 +88,13 @@ int xcc_signal_unregister()
     return r;
 }
 
-int xcc_signal_ignore()
+int xcc_signal_ignore(void)
 {
     struct sigaction act;
-    act.sa_flags = 0;
-    act.sa_handler = SIG_DFL;
+    memset(&act, 0, sizeof(act));
     sigemptyset(&act.sa_mask);
+    act.sa_handler = SIG_DFL;
+    act.sa_flags = SA_RESTART;
     
     int r = 0;
     size_t i;
@@ -97,20 +105,13 @@ int xcc_signal_ignore()
     return r;
 }
 
-void xcc_signal_raise(int sig)
+int xcc_signal_resend(siginfo_t* si)
 {
-    switch(sig)
+    if(SIGABRT == si->si_signo || SI_FROMUSER(si))
     {
-    case SIGABRT:
-    case SIGFPE:
-    case SIGSTKFLT:
-        raise(sig);
-        break;
-    case SIGBUS:
-    case SIGILL:
-    case SIGSEGV:
-    default:
-        //these signals will be re-thrown by kernel again
-        break;
+        if(0 != syscall(SYS_rt_tgsigqueueinfo, getpid(), gettid(), si->si_signo, si))
+            return XCC_ERRNO_SYS;
     }
+
+    return 0;
 }

@@ -19,32 +19,59 @@
 // SOFTWARE.
 //
 
-// Created by caikelun on 2019-03-07.
+// Created by caikelun on 2019-05-30.
+package xcrash;
 
-#ifndef XCD_RECORDER_H
-#define XCD_RECORDER_H 1
+import android.util.Log;
 
-#include <stdint.h>
-#include <sys/types.h>
-#include <stdarg.h>
+class DefaultLogger implements ILogger {
+    @Override
+    public void v(String tag, String msg) {
+        Log.v(tag, msg);
+    }
 
-#ifdef __cplusplus
-extern "C" {
-#endif
+    @Override
+    public void v(String tag, String msg, Throwable tr) {
+        Log.v(tag, msg, tr);
+    }
 
-typedef struct xcd_recorder xcd_recorder_t;
+    @Override
+    public void d(String tag, String msg) {
+        Log.d(tag, msg);
+    }
 
-int xcd_recorder_create(xcd_recorder_t **self, const char *pathname);
-void xcd_recorder_destroy(xcd_recorder_t **self);
+    @Override
+    public void d(String tag, String msg, Throwable tr) {
+        Log.d(tag, msg, tr);
+    }
 
-int xcd_recorder_get_fd(xcd_recorder_t *self);
+    @Override
+    public void i(String tag, String msg) {
+        Log.i(tag, msg);
+    }
 
-int xcd_recorder_write(xcd_recorder_t *self, const char *str);
-int xcd_recorder_print(xcd_recorder_t *self, const char *format, ...);
-int xcd_recorder_vprint(xcd_recorder_t *self, const char *format, va_list ap);
+    @Override
+    public void i(String tag, String msg, Throwable tr) {
+        Log.i(tag, msg, tr);
+    }
 
-#ifdef __cplusplus
+    @Override
+    public void w(String tag, String msg) {
+        Log.w(tag, msg);
+    }
+
+    @Override
+    public void w(String tag, String msg, Throwable tr) {
+        Log.w(tag, msg, tr);
+    }
+
+    @Override
+    public void e(String tag, String msg) {
+        Log.e(tag, msg);
+    }
+
+    @Override
+    public void e(String tag, String msg, Throwable tr) {
+        Log.e(tag, msg, tr);
+    }
 }
-#endif
-
-#endif

@@ -22,17 +22,11 @@
 // Created by caikelun on 2019-03-07.
 package xcrash;
 
-import android.annotation.SuppressLint;
 import android.content.Context;
 import android.text.TextUtils;
 
+import java.util.Map;
 
-/**
- * NOTICE:
- *
- * We are trying to keep this Java wrapper class as simple and clear as possible.
- * Because in many cases, the native part of xCrash will be used independently.
- */
 class NativeCrashHandler {
 
     private static final NativeCrashHandler instance = new NativeCrashHandler();
@@ -46,49 +40,53 @@ class NativeCrashHandler {
         return instance;
     }
 
-    @SuppressLint("UnsafeDynamicallyLoadedCode")
-    int initialize(Context ctx, String appVersion, String logDir, int logCountMax,
+    int initialize(Context ctx, String appId, String appVersion, String logDir, boolean rethrow,
                    int logcatSystemLines, int logcatEventsLines, int logcatMainLines,
-                   boolean dumpMap, boolean dumpFds, boolean dumpAllThreads,
+                   boolean dumpElfHash, boolean dumpMap, boolean dumpFds, boolean dumpAllThreads,
                    int dumpAllThreadsCountMax, String[] dumpAllThreadsWhiteList,
-                   ICrashCallback callback) {
+                   ICrashCallback callback, ILibLoader libLoader) {
         //load lib
-        try {
-            System.loadLibrary("xcrash");
-        } catch (Throwable e) {
-            e.printStackTrace();
+        if (libLoader == null) {
             try {
-                //for some unusual Android version
-                System.load(ctx.getFilesDir().getParent() + "/lib/libxcrash.so");
-            } catch (Throwable e2) {
-                e2.printStackTrace();
+                System.loadLibrary("xcrash");
+            } catch (Throwable e) {
+                XCrash.getLogger().e(Util.TAG, "NativeCrashHandler System.loadLibrary failed", e);
+                return Errno.LOAD_LIBRARY_FAILED;
+            }
+        } else {
+            try {
+                libLoader.loadLibrary("xcrash");
+            } catch (Throwable e) {
+                XCrash.getLogger().e(Util.TAG, "NativeCrashHandler ILibLoader.loadLibrary failed", e);
                 return Errno.LOAD_LIBRARY_FAILED;
             }
         }
 
         this.callback = callback;
 
-        //init
+        //init native lib
         try {
-            return initEx(ctx,
-                    true,
+            int r = init(rethrow,
+                    appId,
                     appVersion,
+                    ctx.getApplicationInfo().nativeLibraryDir,
                     logDir,
-                    Util.logPrefix,
-                    Util.nativeLogSuffix,
-                    logCountMax,
                     logcatSystemLines,
                     logcatEventsLines,
                     logcatMainLines,
+                    dumpElfHash,
                     dumpMap,
                     dumpFds,
                     dumpAllThreads,
                     dumpAllThreadsCountMax,
-                    dumpAllThreadsWhiteList,
-                    "xcrash/NativeCrashHandler",
-                    "callback");
+                    dumpAllThreadsWhiteList);
+            if (r != 0) {
+                XCrash.getLogger().e(Util.TAG, "NativeCrashHandler init failed");
+                return Errno.INIT_LIBRARY_FAILED;
+            }
+            return 0; //OK
         } catch (Throwable e) {
-            e.printStackTrace();
+            XCrash.getLogger().e(Util.TAG, "NativeCrashHandler init failed", e);
             return Errno.INIT_LIBRARY_FAILED;
         }
     }
@@ -97,12 +95,39 @@ class NativeCrashHandler {
         NativeCrashHandler.test(runInNewThread ? 1 : 0);
     }
 
+    private static String getStacktraceByThreadName(boolean isMainThread, String threadName) {
+        try {
+            for (Map.Entry<Thread, StackTraceElement[]> entry : Thread.getAllStackTraces().entrySet()) {
+                Thread thd = entry.getKey();
+                if ((isMainThread && thd.getName().equals("main")) || (!isMainThread && thd.getName().contains(threadName))) {
+                    StringBuilder sb = new StringBuilder();
+                    for (StackTraceElement element : entry.getValue()) {
+                        sb.append("    at ").append(element.toString()).append("\n");
+                    }
+                    return sb.toString();
+                }
+            }
+        } catch (Exception e) {
+            XCrash.getLogger().e(Util.TAG, "NativeCrashHandler getStacktraceByThreadName failed", e);
+        }
+        return null;
+    }
+
     // do NOT obfuscate this method
     @SuppressWarnings("unused")
-    private static void callback(String logPath, String emergency) {
-
+    private static void callback(String logPath, String emergency, boolean isJavaThread, boolean isMainThread, String threadName) {
         if (!TextUtils.isEmpty(logPath)) {
-            TombstoneManager.appendSection(logPath, "memory info", Util.getMemoryInfo());
+
+            //append java stacktrace
+            if (isJavaThread) {
+                String stacktrace = getStacktraceByThreadName(isMainThread, threadName);
+                if (!TextUtils.isEmpty(stacktrace)) {
+                    TombstoneManager.appendSection(logPath, "java stacktrace", stacktrace);
+                }
+            }
+
+            //append memory info
+            TombstoneManager.appendSection(logPath, "memory info", Util.getProcessMemoryInfo());
         }
 
         ICrashCallback callback = NativeCrashHandler.getInstance().callback;
@@ -110,32 +135,26 @@ class NativeCrashHandler {
             try {
                 callback.onCrash(logPath, emergency);
             } catch (Exception e) {
-                e.printStackTrace();
+                XCrash.getLogger().w(Util.TAG, "NativeCrashHandler callback.onCrash failed", e);
             }
         }
     }
 
-    @SuppressWarnings("unused")
-    private static native int init(Context ctx);
-
-    private static native int initEx(
-            Context ctx,
+    private static native int init(
             boolean restoreSignalHandler,
+            String appId,
             String appVersion,
+            String appLibDir,
             String logDir,
-            String logPrefix,
-            String logSuffix,
-            int logCountMax,
             int logcatSystemLines,
             int logcatEventsLines,
             int logcatMainLines,
+            boolean dumpElfHash,
             boolean dumpMap,
             boolean dumpFds,
             boolean dumpAllThreads,
             int dumpAllThreadsCountMax,
-            String[] dumpAllThreadsWhiteList,
-            String callbackClass,
-            String callbackMethod);
+            String[] dumpAllThreadsWhiteList);
 
     private static native void test(int runInNewThread);
 }

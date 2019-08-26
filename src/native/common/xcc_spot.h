@@ -33,6 +33,9 @@
 extern "C" {
 #endif
 
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wpadded"
+
 typedef struct
 {
     //set when crashed
@@ -47,6 +50,7 @@ typedef struct
     unsigned int logcat_system_lines;
     unsigned int logcat_events_lines;
     unsigned int logcat_main_lines;
+    int          dump_elf_hash;
     int          dump_map;
     int          dump_fds;
     int          dump_all_threads;
@@ -58,6 +62,8 @@ typedef struct
     size_t       app_version_len;
     size_t       dump_all_threads_whitelist_len;
 } xcc_spot_t;
+
+#pragma clang diagnostic pop
 
 #ifdef __cplusplus
 }

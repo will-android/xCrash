@@ -27,7 +27,6 @@
 #include <stdint.h>
 #include <sys/types.h>
 #include "xcd_elf.h"
-#include "xcd_recorder.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -35,6 +34,8 @@ extern "C" {
 
 #define XCD_MAP_PORT_DEVICE 0x8000
 
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wpadded"
 typedef struct xcd_map
 {
     //base info from /proc/<PID>/maps
@@ -50,6 +51,7 @@ typedef struct xcd_map
     size_t     elf_offset;
     size_t     elf_start_offset;
 } xcd_map_t;
+#pragma clang diagnostic pop
 
 int xcd_map_init(xcd_map_t *self, uintptr_t start, uintptr_t end, size_t offset,
                  const char * flags, const char *name);
@@ -57,6 +59,7 @@ void xcd_map_uninit(xcd_map_t *self);
 
 xcd_elf_t *xcd_map_get_elf(xcd_map_t *self, pid_t pid, void *maps_obj);
 uintptr_t xcd_map_get_rel_pc(xcd_map_t *self, uintptr_t pc, pid_t pid, void *maps_obj);
+uintptr_t xcd_map_get_abs_pc(xcd_map_t *self, uintptr_t pc, pid_t pid, void *maps_obj);
 
 #ifdef __cplusplus
 }

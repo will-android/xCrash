@@ -21,7 +21,11 @@
 
 // Created by caikelun on 2019-03-07.
 
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wreserved-id-macro"
 #define _GNU_SOURCE
+#pragma clang diagnostic pop
+
 #include <stdio.h>
 #include <stdlib.h>
 #include <unistd.h>
@@ -35,7 +39,6 @@
 #include <sys/types.h>
 #include <sys/wait.h>
 #include <sys/stat.h>
-#include <sys/syscall.h>
 #include "xcc_errno.h"
 #include "xcc_util.h"
 #include "xcc_unwind.h"
@@ -44,30 +47,12 @@
 #include "xc_fallback.h"
 #include "xc_util.h"
 
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wgnu-statement-expression"
+
 #define XC_FALLBACK_TIME_FORMAT "%s: '%04d-%02d-%02dT%02d:%02d:%02d.%03ld%c%02ld%02ld'\n"
 
-#ifndef __LP64__
-#define XC_FALLBACK_SYSCALL_GETDENTS SYS_getdents
-#else
-#define XC_FALLBACK_SYSCALL_GETDENTS SYS_getdents64
-#endif
-
-typedef struct
-{
-#ifndef __LP64__
-    unsigned long  d_ino;
-    unsigned long  d_off;
-    unsigned short d_reclen;
-#else
-    ino64_t        d_ino;
-    off64_t        d_off;
-    unsigned short d_reclen;
-    unsigned char  d_type;
-#endif
-    char           d_name[1];
-} xc_fallback_dirent_t;
-
-static int xc_fallback_get_file_line(char *buf, size_t len, const char *title, const char *path)
+static size_t xc_fallback_get_file_line(char *buf, size_t len, const char *title, const char *path)
 {
     int   fd2 = -1;
     char  line[256];
@@ -82,9 +67,9 @@ static int xc_fallback_get_file_line(char *buf, size_t len, const char *title, c
     return xcc_fmt_snprintf(buf, len, "%s: '%s'\n", title, p);
 }
 
-static int xc_fallback_get_cpu(char *buf, size_t len)
+static size_t xc_fallback_get_cpu(char *buf, size_t len)
 {
-    int used = 0;
+    size_t used = 0;
 
     used += xc_fallback_get_file_line(buf + used, len - used, "CPU loadavg", "/proc/loadavg");
     used += xc_fallback_get_file_line(buf + used, len - used, "CPU online",  "/sys/devices/system/cpu/online");
@@ -113,7 +98,7 @@ static int xc_fallback_parse_kb(char *line, const char *key)
     return val;
 }
 
-static int xc_fallback_get_system_mem(char *buf, size_t len)
+static size_t xc_fallback_get_system_mem(char *buf, size_t len)
 {
     int     fd = -1;
     char    line[256];
@@ -123,9 +108,9 @@ static int xc_fallback_get_system_mem(char *buf, size_t len)
     size_t  mbuffers = 0;
     size_t  mcached = 0;
     size_t  mfree_all = 0;
-    int     used = 0;
+    size_t  used = 0;
 
-    if((fd = TEMP_FAILURE_RETRY(open("/proc/meminfo", O_RDONLY | O_CLOEXEC))) < 0) goto end;
+    if((fd = XCC_UTIL_TEMP_FAILURE_RETRY(open("/proc/meminfo", O_RDONLY | O_CLOEXEC))) < 0) goto end;
     
     while(NULL != xcc_util_gets(line, sizeof(line), fd))
     {
@@ -155,24 +140,28 @@ static int xc_fallback_get_system_mem(char *buf, size_t len)
 
 static size_t xc_fallback_get_number_of_threads(pid_t pid)
 {
-    int                   fd = -1;
-    char                  path[64];
-    char                  buf[512];
-    int                   n, i, tid;
-    size_t                total = 0;
-    xc_fallback_dirent_t *ent;
+    int               fd = -1;
+    char              path[64];
+    char              buf[512];
+    long              n, i;
+    int               tid;
+    size_t            total = 0;
+    xc_util_dirent_t *ent;
     
     xcc_fmt_snprintf(path, sizeof(path), "/proc/%d/task", pid);
-    if((fd = TEMP_FAILURE_RETRY(open(path, O_RDONLY | O_DIRECTORY | O_CLOEXEC))) < 0) goto end;
+    if((fd = XCC_UTIL_TEMP_FAILURE_RETRY(open(path, O_RDONLY | O_DIRECTORY | O_CLOEXEC))) < 0) goto end;
     
     while(1)
     {
-        n = syscall(XC_FALLBACK_SYSCALL_GETDENTS, fd, buf, sizeof(buf));
+        n = syscall(XC_UTIL_SYSCALL_GETDENTS, fd, buf, sizeof(buf));
         if(n <= 0) goto end;
 
         for(i = 0; i < n;)
         {
-            ent = (xc_fallback_dirent_t *)(buf + i);
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wcast-align"
+            ent = (xc_util_dirent_t *)(buf + i);
+#pragma clang diagnostic pop
             
             if(0 != memcmp(ent->d_name, ".", 1) &&
                0 != memcmp(ent->d_name, "..", 2) &&
@@ -188,21 +177,21 @@ static size_t xc_fallback_get_number_of_threads(pid_t pid)
     return total;
 }
 
-static int xc_fallback_get_process_thread(char *buf, size_t len, pid_t pid, pid_t tid)
+static size_t xc_fallback_get_process_thread(char *buf, size_t len, pid_t pid, pid_t tid)
 {
-    char  buf1[128];
-    char  buf2[64];
+    char  pname_buf[256];
+    char  tname_buf[64];
     char *pname = "<unknown>";
     char *tname = "<unknown>";
     
-    if(0 == xcc_util_get_process_name(pid, buf1, sizeof(buf1))) pname = xcc_util_trim(buf1);
-    if(0 == xcc_util_get_thread_name(tid, buf2, sizeof(buf2)))  tname = xcc_util_trim(buf2);
+    if(0 == xcc_util_get_process_name(pid, pname_buf, sizeof(pname_buf))) pname = pname_buf;
+    if(0 == xcc_util_get_thread_name(tid, tname_buf, sizeof(tname_buf)))  tname = tname_buf;
 
     return xcc_fmt_snprintf(buf, len, "pid: %d, tid: %d, name: %s  >>> %s <<<\n",
                             pid, tid, tname, pname);
 }
 
-static int xc_fallback_get_signal(char *buf, size_t len, siginfo_t *si, pid_t pid)
+static size_t xc_fallback_get_signal(char *buf, size_t len, siginfo_t *si, pid_t pid)
 {
     //fault addr
     char addr_desc[64];
@@ -221,7 +210,7 @@ static int xc_fallback_get_signal(char *buf, size_t len, siginfo_t *si, pid_t pi
                             si->si_code, xcc_util_get_sigcodename(si), sender_desc, addr_desc);
 }
 
-static int xc_fallback_get_regs(char *buf, size_t len, ucontext_t *uc)
+static size_t xc_fallback_get_regs(char *buf, size_t len, ucontext_t *uc)
 {
 #if defined(__arm__)
     return xcc_fmt_snprintf(buf, len, 
@@ -330,12 +319,12 @@ static int xc_fallback_get_regs(char *buf, size_t len, ucontext_t *uc)
 #endif
 }
 
-static int xc_fallback_get_backtrace(char *buf, size_t len, ucontext_t *uc, const char *ignore_lib)
+static size_t xc_fallback_get_backtrace(char *buf, size_t len, int api_level, siginfo_t *si, ucontext_t *uc)
 {
     size_t used = 0;
 
     used += xcc_fmt_snprintf(buf + used, len - used, "backtrace:\n");
-    used += xcc_unwind_get(uc, ignore_lib, buf + used, len - used);
+    used += xcc_unwind_get(api_level, si, uc, buf + used, len - used);
     if(used >= len - 1)
     {
         buf[len - 3] = '\n';
@@ -354,12 +343,12 @@ static int xc_fallback_record_logcat_buffer(int fd, const char *pid_str,
     
     xcc_fmt_snprintf(lines_str, sizeof(lines_str), "%u", lines);
 
-    if(0 != (r = xcc_util_write_format(fd,
-                                       "--------- tail end of log %s "
-                                       "(/system/bin/logcat -b %s -d -v threadtime -t %u%s%s %s)\n",
-                                       buffer, buffer, lines, pid_str ? " --pid " : "",
-                                       pid_str ? pid_str : "", priority))) return r;
-             
+    if(0 != (r = xcc_util_write_format_safe(fd,
+                                            "--------- tail end of log %s "
+                                            "(/system/bin/logcat -b %s -d -v threadtime -t %u%s%s %s)\n",
+                                            buffer, buffer, lines, pid_str ? " --pid " : "",
+                                            pid_str ? pid_str : "", priority))) return r;
+    
     int child = fork();
     if(child < 0)
     {
@@ -369,7 +358,7 @@ static int xc_fallback_record_logcat_buffer(int fd, const char *pid_str,
     {
         //child...
         
-        alarm(5); //don't leave a zombie process
+        alarm(3); //don't leave a zombie process
         
         if(dup2(fd, STDOUT_FILENO) < 0) exit(0);
 
@@ -409,34 +398,38 @@ static int xc_fallback_record_logcat(int fd, pid_t pid, int api_level, unsigned 
 
     if(0 != (r = xcc_util_write_str(fd, "\n"))) return r;
 
-    return 1;
+    return 0;
 }
 
 static int xc_fallback_record_fds(int fd, pid_t pid)
 {
-    int                   fd2 = -1;
-    char                  path[128];
-    char                  fd_path[512];
-    char                  buf[512];
-    int                   n, i, fd_num;
-    size_t                total = 0;
-    xc_fallback_dirent_t *ent;
-    ssize_t               len;
-    int                   r = 0;
+    int               fd2 = -1;
+    char              path[128];
+    char              fd_path[512];
+    char              buf[512];
+    long              n, i;
+    int               fd_num;
+    size_t            total = 0;
+    xc_util_dirent_t *ent;
+    ssize_t           len;
+    int               r = 0;
 
     if(0 != (r = xcc_util_write_str(fd, "open files:\n"))) return r;
 
     xcc_fmt_snprintf(path, sizeof(path), "/proc/%d/fd", pid);
-    if((fd2 = TEMP_FAILURE_RETRY(open(path, O_RDONLY | O_DIRECTORY | O_CLOEXEC))) < 0) goto end;
+    if((fd2 = XCC_UTIL_TEMP_FAILURE_RETRY(open(path, O_RDONLY | O_DIRECTORY | O_CLOEXEC))) < 0) goto end;
     
     while(1)
     {
-        n = syscall(XC_FALLBACK_SYSCALL_GETDENTS, fd2, buf, sizeof(buf));
+        n = syscall(XC_UTIL_SYSCALL_GETDENTS, fd2, buf, sizeof(buf));
         if(n <= 0) break;
 
         for(i = 0; i < n;)
         {
-            ent = (xc_fallback_dirent_t *)(buf + i);
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wcast-align"
+            ent = (xc_util_dirent_t *)(buf + i);
+#pragma clang diagnostic pop
 
             //get the fd
             if('\0' == ent->d_name[0]) goto next;
@@ -458,7 +451,7 @@ static int xc_fallback_record_fds(int fd, pid_t pid)
                 fd_path[len] = '\0';
             
             //dump
-            if(0 != (r = xcc_util_write_format(fd, "    fd %d: %s\n", fd_num, fd_path))) goto clean;
+            if(0 != (r = xcc_util_write_format_safe(fd, "    fd %d: %s\n", fd_num, fd_path))) goto clean;
             
         next:
             i += ent->d_reclen;
@@ -468,7 +461,7 @@ static int xc_fallback_record_fds(int fd, pid_t pid)
  end:
     if(total > 1024)
         if(0 != (r = xcc_util_write_str(fd, "    ......\n"))) goto clean;
-    if(0 != (r = xcc_util_write_format(fd, "    (number of FDs: %zu)\n", total))) goto clean;
+    if(0 != (r = xcc_util_write_format_safe(fd, "    (number of FDs: %zu)\n", total))) goto clean;
     r = xcc_util_write_str(fd, "\n");
 
  clean:
@@ -476,26 +469,26 @@ static int xc_fallback_record_fds(int fd, pid_t pid)
     return r;
 }
 
-int xc_fallback_get_emergency(siginfo_t *si,
-                              ucontext_t *uc,
-                              pid_t pid,
-                              pid_t tid,
-                              long timezone,
-                              uint64_t start_time,
-                              uint64_t crash_time,
-                              const char *app_id,
-                              const char *app_version,
-                              int api_level,
-                              const char *os_version,
-                              const char *kernel_version,
-                              const char *abi_list,
-                              const char *manufacturer,
-                              const char *brand,
-                              const char *model,
-                              const char *build_fingerprint,
-                              const char *revision,
-                              char *emergency,
-                              size_t emergency_len)
+size_t xc_fallback_get_emergency(siginfo_t *si,
+                                 ucontext_t *uc,
+                                 pid_t pid,
+                                 pid_t tid,
+                                 long tz,
+                                 uint64_t start_time,
+                                 uint64_t crash_time,
+                                 const char *app_id,
+                                 const char *app_version,
+                                 int api_level,
+                                 const char *os_version,
+                                 const char *kernel_version,
+                                 const char *abi_list,
+                                 const char *manufacturer,
+                                 const char *brand,
+                                 const char *model,
+                                 const char *build_fingerprint,
+                                 const char *revision,
+                                 char *emergency,
+                                 size_t emergency_len)
 {
     time_t       start_sec  = (time_t)(start_time / 1000000);
     suseconds_t  start_usec = (time_t)(start_time % 1000000);
@@ -510,8 +503,8 @@ int xc_fallback_get_emergency(siginfo_t *si,
     //convert times
     memset(&crash_tm, 0, sizeof(crash_tm));
     memset(&start_tm, 0, sizeof(start_tm));
-    xca_util_time2tm(start_sec, timezone, &start_tm);
-    xca_util_time2tm(crash_sec, timezone, &crash_tm);
+    xca_util_time2tm(start_sec, tz, &start_tm);
+    xca_util_time2tm(crash_sec, tz, &crash_tm);
 
     //dump
     used += xcc_fmt_snprintf(buf + used, len - used, XCC_UTIL_TOMB_HEAD);
@@ -520,11 +513,11 @@ int xc_fallback_get_emergency(siginfo_t *si,
     used += xcc_fmt_snprintf(buf + used, len - used, XC_FALLBACK_TIME_FORMAT, "Start time",
                              start_tm.tm_year + 1900, start_tm.tm_mon + 1, start_tm.tm_mday,
                              start_tm.tm_hour, start_tm.tm_min, start_tm.tm_sec, start_usec / 1000,
-                             timezone < 0 ? '-' : '+', labs(timezone / 3600), labs(timezone % 3600));
+                             tz < 0 ? '-' : '+', labs(tz / 3600), labs(tz % 3600));
     used += xcc_fmt_snprintf(buf + used, len - used, XC_FALLBACK_TIME_FORMAT, "Crash time",
                              crash_tm.tm_year + 1900, crash_tm.tm_mon + 1, crash_tm.tm_mday,
                              crash_tm.tm_hour, crash_tm.tm_min, crash_tm.tm_sec, crash_usec / 1000,
-                             timezone < 0 ? '-' : '+', labs(timezone / 3600), labs(timezone % 3600));
+                             tz < 0 ? '-' : '+', labs(tz / 3600), labs(tz % 3600));
     used += xcc_fmt_snprintf(buf + used, len - used, "App ID: '%s'\n", app_id);
     used += xcc_fmt_snprintf(buf + used, len - used, "App version: '%s'\n", app_version);
     used += xc_fallback_get_cpu(buf + used, len - used);
@@ -544,11 +537,11 @@ int xc_fallback_get_emergency(siginfo_t *si,
     used += xc_fallback_get_process_thread(buf + used, len - used, pid, tid);
     used += xc_fallback_get_signal(buf + used, len - used, si, pid);
     used += xc_fallback_get_regs(buf + used, len - used, uc);
-    used += xc_fallback_get_backtrace(buf + used, len - used, uc, XCC_UTIL_XCRASH_FILENAME);
+    used += xc_fallback_get_backtrace(buf + used, len - used, api_level, si, uc);
     return used;
 }
 
-int xc_fallback_record(xc_recorder_t *recorder,
+int xc_fallback_record(int log_fd,
                        char *emergency,
                        pid_t pid,
                        int api_level,
@@ -556,19 +549,17 @@ int xc_fallback_record(xc_recorder_t *recorder,
                        unsigned int logcat_events_lines,
                        unsigned int logcat_main_lines)
 {
-    int fd = -1;
-    int r = 0;
-    
-    if(0 != (r = xc_recorder_open(recorder, &fd))) goto end;
-    if(0 != (r = xcc_util_write_str(fd, emergency))) goto end;
+    int r;
 
-    //If we wrote the emergency info successfully, we don't need to return it from callback again.
-    emergency[0] = '\0';
+    if(log_fd < 0) return XCC_ERRNO_INVAL;
     
-    if(0 != (r = xc_fallback_record_logcat(fd, pid, api_level, logcat_system_lines, logcat_events_lines, logcat_main_lines))) goto end;
-    if(0 != (r = xc_fallback_record_fds(fd, pid))) goto end;
-
- end:
-    if(fd >= 0) xc_recorder_close(recorder, fd);
-    return r;    
+    if(0 != (r = xcc_util_write_str(log_fd, emergency))) return r;
+    emergency[0] = '\0'; //If we wrote the emergency info successfully, we don't need to return it from callback again.
+    
+    if(0 != (r = xc_fallback_record_logcat(log_fd, pid, api_level, logcat_system_lines, logcat_events_lines, logcat_main_lines))) return r;
+    if(0 != (r = xc_fallback_record_fds(log_fd, pid))) return r;
+    
+    return 0;
 }
+
+#pragma clang diagnostic pop

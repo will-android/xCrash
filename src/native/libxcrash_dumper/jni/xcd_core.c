@@ -50,9 +50,12 @@
 #include "xcd_sys.h"
 #include "xcd_util.h"
 
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wgnu-statement-expression"
+
 static int                    xcd_core_handled      = 0;
+static int                    xcd_core_log_fd       = -1;
 static xcc_util_build_prop_t  xcd_core_build_prop;
-static xcd_recorder_t        *xcd_core_recorder     = NULL;
 static xcd_process_t         *xcd_core_proc         = NULL;
 static xcc_spot_t             xcd_core_spot;
 static char                  *xcd_core_log_pathname = NULL;
@@ -62,17 +65,28 @@ static char                  *xcd_core_dump_all_threads_whitelist = NULL;
 
 static int xcd_core_read_stdin(const char *what, void *buf, size_t len)
 {
-    ssize_t rc = TEMP_FAILURE_RETRY(read(STDIN_FILENO, buf, len));
-    if(-1 == rc)
+    size_t  nread = 0;
+    ssize_t n;
+
+    while(len - nread > 0)
     {
-        XCD_LOG_ERROR("CORE: read (%s) failed, errno=%d", what, errno);
-        return XCC_ERRNO_SYS;
+        n = XCC_UTIL_TEMP_FAILURE_RETRY(read(STDIN_FILENO, (void *)((uint8_t *)buf + nread), len - nread));
+        if(n < 0)
+        {
+            XCD_LOG_ERROR("CORE: read %s failed, errno=%d", what, errno);
+            return XCC_ERRNO_SYS;
+        }
+        else if(0 == n)
+        {
+            XCD_LOG_ERROR("CORE: read %s failed, expect %zu, read %zu", what, len, nread);
+            return XCC_ERRNO_SYS;
+        }
+        else
+        {
+            nread += (size_t)n;
+        }
     }
-    else if((ssize_t)len != rc)
-    {
-        XCD_LOG_ERROR("CORE: read %zd bytes (%s), expected %zu", rc, what, len);
-        return XCC_ERRNO_SYS;
-    }
+    
     return 0;
 }
 
@@ -110,6 +124,7 @@ static int xcd_core_read_args()
                         "logcat_system_lines=%u, "
                         "logcat_events_lines=%u, "
                         "logcat_main_lines=%u, "
+                        "dump_elf_hash=%d, "
                         "dump_map=%d, "
                         "dump_fds=%d, "
                         "dump_all_threads=%d, "
@@ -129,6 +144,7 @@ static int xcd_core_read_args()
                         xcd_core_spot.logcat_system_lines,
                         xcd_core_spot.logcat_events_lines,
                         xcd_core_spot.logcat_main_lines,
+                        xcd_core_spot.dump_elf_hash,
                         xcd_core_spot.dump_map,
                         xcd_core_spot.dump_fds,
                         xcd_core_spot.dump_all_threads,
@@ -149,45 +165,38 @@ static int xcd_core_read_args()
 
 static void xcd_core_signal_handler(int sig, siginfo_t *si, void *uc)
 {
-    int   fd = -1;
-    int   need_close = 0;
-    char  buf[2048] = "\0";
+    char buf[2048] = "\0";
+
+    (void)sig;
 
     //only once
-    if(xcd_core_handled) goto exit;
+    if(xcd_core_handled) _exit(200);
     xcd_core_handled = 1;
 
-    //restore the default system signal handler
+    //restore the signal handler
     if(0 != xcc_signal_unregister()) goto end;
 
-    //open file
-    fd = xcd_recorder_get_fd(xcd_core_recorder);
-    if(fd < 0)
+    if(xcd_core_log_fd >= 0)
     {
-        if(NULL != xcd_core_log_pathname)
-        {
-            fd = open(xcd_core_log_pathname, O_WRONLY | O_CLOEXEC | O_APPEND, 0644);
-            need_close = 1;
-        }
+        //dump signal, code, backtrace
+        if(0 != xcc_util_write_format_safe(xcd_core_log_fd,
+                                           "\n\n"
+                                           "xcrash error debug:\n"
+                                           "dumper has crashed (signal: %d, code: %d)\n",
+                                           si->si_signo, si->si_code)) goto err;
+        if(0 != xcc_unwind_get(xcd_core_build_prop.api_level, si, uc, buf, sizeof(buf))) goto err;
+        if(0 != xcc_util_write_str(xcd_core_log_fd, buf)) goto err;
     }
-    if(fd < 0) goto end;
 
-    //dump signal, code, backtrace
-    if(0 != xcc_util_write_format(fd,
-                                  "\n\nxcrash error debug:\n"
-                                  "dumper has crashed (signal: %d, code: %d)\n",
-                                  si->si_signo, si->si_code)) goto end;
-    if(0 != xcc_unwind_get(uc, NULL, buf, sizeof(buf))) goto end;
-    if(0 != xcc_util_write_str(fd, buf)) goto end;
-    if(0 != xcc_util_write_str(fd, "\n")) goto end;
-
+ err:
+    if(xcd_core_log_fd >= 0)
+    {
+        xcc_util_write_str(xcd_core_log_fd, "\n\n");
+    }
+    
  end:
-    if(need_close && fd >= 0) close(fd);
-    xcc_signal_raise(sig);
+    xcc_signal_resend(si);
     return;
-
- exit:
-    _exit(1);
 }
 
 int main(int argc, char** argv)
@@ -198,57 +207,53 @@ int main(int argc, char** argv)
     //don't leave a zombie process
     alarm(30);
 
+    //read args from stdin
+    if(0 != xcd_core_read_args()) exit(1);
+
+    //load build property
+    xcc_util_load_build_prop(&xcd_core_build_prop);
+
+    //open log file
+    if(0 > (xcd_core_log_fd = XCC_UTIL_TEMP_FAILURE_RETRY(open(xcd_core_log_pathname, O_WRONLY | O_CLOEXEC)))) exit(2);
+
     //register signal handler for catching self-crashing
     xcc_signal_register(xcd_core_signal_handler);
-
-    //read info from pipe
-    if(0 != xcd_core_read_args()) exit(103);
 
     //create process object
     if(0 != xcd_process_create(&xcd_core_proc,
                                xcd_core_spot.crash_pid,
                                xcd_core_spot.crash_tid,
                                &(xcd_core_spot.siginfo),
-                               &(xcd_core_spot.ucontext))) exit(104);
+                               &(xcd_core_spot.ucontext))) exit(3);
 
     //suspend all threads in the process
     xcd_process_suspend_threads(xcd_core_proc);
 
-    //load build property
-    xcc_util_load_build_prop(&xcd_core_build_prop);
-
-    //load info
-    if(0 != xcd_process_load_info(xcd_core_proc)) exit(105);
-
-    //create recorder
-    if(0 != xcd_recorder_create(&xcd_core_recorder,
-                                xcd_core_log_pathname)) exit(106);
+    //load process info
+    if(0 != xcd_process_load_info(xcd_core_proc)) exit(4);
 
     //record system info
-    if(0 != xcd_sys_record(xcd_core_recorder,
+    if(0 != xcd_sys_record(xcd_core_log_fd,
                            xcd_core_spot.start_time,
                            xcd_core_spot.crash_time,
                            xcd_core_app_id,
                            xcd_core_app_version,
                            &xcd_core_build_prop,
-                           xcd_process_get_number_of_threads(xcd_core_proc))) exit(107);
+                           xcd_process_get_number_of_threads(xcd_core_proc))) exit(5);
 
     //record process info
     if(0 != xcd_process_record(xcd_core_proc,
-                               xcd_core_recorder,
+                               xcd_core_log_fd,
                                xcd_core_spot.logcat_system_lines,
                                xcd_core_spot.logcat_events_lines,
                                xcd_core_spot.logcat_main_lines,
+                               xcd_core_spot.dump_elf_hash,
                                xcd_core_spot.dump_map,
                                xcd_core_spot.dump_fds,
                                xcd_core_spot.dump_all_threads,
                                xcd_core_spot.dump_all_threads_count_max,
                                xcd_core_dump_all_threads_whitelist,
-                               xcd_core_build_prop.api_level)) exit(108);
-
-    //free recorder
-    if(NULL != xcd_core_recorder)
-        xcd_recorder_destroy(&xcd_core_recorder);
+                               xcd_core_build_prop.api_level)) exit(6);
 
     //resume all threads in the process
     xcd_process_resume_threads(xcd_core_proc);
@@ -258,3 +263,5 @@ int main(int argc, char** argv)
 #endif
     return 0;
 }
+
+#pragma clang diagnostic pop

@@ -33,8 +33,6 @@ import java.io.File;
 import java.io.FileReader;
 import java.io.FilenameFilter;
 import java.io.IOException;
-import java.text.DateFormat;
-import java.text.SimpleDateFormat;
 import java.util.Locale;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
@@ -46,21 +44,24 @@ class Util {
     private Util() {
     }
 
-    static final DateFormat timeFormatter = new SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss.SSSZ", Locale.US);
     private static final String memInfoFmt = "%21s %8s\n";
     private static final String memInfoFmt2 = "%21s %8s %21s %8s\n";
+
+    static final String TAG = "xcrash_" + Version.version;
 
     static final String sepHead = "*** *** *** *** *** *** *** *** *** *** *** *** *** *** *** ***";
     static final String sepOtherThreads = "--- --- --- --- --- --- --- --- --- --- --- --- --- --- --- ---";
     static final String sepOtherThreadsEnding = "+++ +++ +++ +++ +++ +++ +++ +++ +++ +++ +++ +++ +++ +++ +++ +++";
 
-    static final String logPrefix = "tombstone";
-    static final String javaLogSuffix = ".java.xcrash";
-    static final String nativeLogSuffix = ".native.xcrash";
+    static final String timeFormatterStr = "yyyy-MM-dd'T'HH:mm:ss.SSSZ";
+
     static final String javaCrashType = "java";
     static final String nativeCrashType = "native";
 
-    @SuppressWarnings("TryFinallyCanBeTryWithResources")
+    static final String logPrefix = "tombstone";
+    static final String javaLogSuffix = ".java.xcrash";
+    static final String nativeLogSuffix = ".native.xcrash";
+
     static String readFileLine(String path) {
         BufferedReader br = null;
         try {
@@ -81,18 +82,17 @@ class Util {
     private static final Pattern patBuffers = Pattern.compile("^Buffers:\\s+(\\d*)\\s+kB$");
     private static final Pattern patCached = Pattern.compile("^Cached:\\s+(\\d*)\\s+kB$");
 
-    static class MemoryInfo {
-        MemoryInfo() {
-            systemMemoryTotalKb = 0;
-            systemMemoryUsedKb = 0;
+    static class SystemMemoryInfo {
+        SystemMemoryInfo() {
+            totalKb = 0;
+            usedKb = 0;
         }
-        long systemMemoryTotalKb;
-        long systemMemoryUsedKb;
+        long totalKb;
+        long usedKb;
     }
 
-    @SuppressWarnings("TryFinallyCanBeTryWithResources")
-    static MemoryInfo getMemoryInfo(Context ctx) {
-        Util.MemoryInfo memoryInfo = new Util.MemoryInfo();
+    static SystemMemoryInfo getSystemMemoryInfo(Context ctx) {
+        Util.SystemMemoryInfo memoryInfo = new Util.SystemMemoryInfo();
 
         //get system total and used memory
         if (android.os.Build.VERSION.SDK_INT >= 16) {
@@ -101,13 +101,13 @@ class Util {
                 ActivityManager activityManager = (ActivityManager) ctx.getSystemService(ACTIVITY_SERVICE);
                 if (activityManager != null) {
                     activityManager.getMemoryInfo(mi);
-                    memoryInfo.systemMemoryTotalKb = mi.totalMem / 1024;
-                    memoryInfo.systemMemoryUsedKb = (mi.totalMem - mi.availMem) / 1024;
+                    memoryInfo.totalKb = mi.totalMem / 1024;
+                    memoryInfo.usedKb = (mi.totalMem - mi.availMem) / 1024;
                 }
             } catch (Exception ignored) {
             }
         }
-        if (memoryInfo.systemMemoryTotalKb == 0 || memoryInfo.systemMemoryUsedKb == 0) {
+        if (memoryInfo.totalKb == 0 || memoryInfo.usedKb == 0) {
             BufferedReader br = null;
             String line;
             Matcher matcher;
@@ -138,12 +138,12 @@ class Util {
                         memCached = Long.parseLong(matcher.group(1), 10);
                     }
                 }
-                memoryInfo.systemMemoryTotalKb = memTotal;
-                memoryInfo.systemMemoryUsedKb = memTotal - memFree - memBuffers - memCached;
+                memoryInfo.totalKb = memTotal;
+                memoryInfo.usedKb = memTotal - memFree - memBuffers - memCached;
             } catch (Exception e) {
-                memoryInfo.systemMemoryTotalKb = 0;
-                memoryInfo.systemMemoryUsedKb = 0;
-                e.printStackTrace();
+                memoryInfo.totalKb = 0;
+                memoryInfo.usedKb = 0;
+                XCrash.getLogger().i(Util.TAG, "Util getSystemMemoryInfo failed", e);
             } finally {
                 if (br != null) {
                     try {
@@ -166,7 +166,7 @@ class Util {
                     return android.text.TextUtils.isDigitsOnly(name);
                 }
             });
-            return files.length;
+            return files == null ? 0 : files.length;
         } catch (Exception ignored) {
             return 0;
         }
@@ -243,7 +243,7 @@ class Util {
         return appVersion;
     }
 
-    static String getMemoryInfo() {
+    static String getProcessMemoryInfo() {
         StringBuilder sb = new StringBuilder();
         sb.append(" Process Summary (From: android.os.Debug.MemoryInfo)\n");
         sb.append(String.format(Locale.US, memInfoFmt, "", "Pss(KB)"));
@@ -263,20 +263,35 @@ class Util {
                 sb.append(String.format(Locale.US, memInfoFmt, "System:", mi.getMemoryStat("summary.system")));
                 sb.append(String.format(Locale.US, memInfoFmt2, "TOTAL:", mi.getMemoryStat("summary.total-pss"), "TOTAL SWAP:", mi.getMemoryStat("summary.total-swap")));
             } else {
-                sb.append(String.format(Locale.US, memInfoFmt, "Java Heap:", "~ " + String.valueOf(mi.dalvikPrivateDirty)));
+                sb.append(String.format(Locale.US, memInfoFmt, "Java Heap:", "~ " + mi.dalvikPrivateDirty));
                 sb.append(String.format(Locale.US, memInfoFmt, "Native Heap:", String.valueOf(mi.nativePrivateDirty)));
-                sb.append(String.format(Locale.US, memInfoFmt, "Private Other:", "~ " + String.valueOf(mi.otherPrivateDirty)));
+                sb.append(String.format(Locale.US, memInfoFmt, "Private Other:", "~ " + mi.otherPrivateDirty));
                 if (Build.VERSION.SDK_INT >= 19) {
                     sb.append(String.format(Locale.US, memInfoFmt, "System:", String.valueOf(mi.getTotalPss() - mi.getTotalPrivateDirty() - mi.getTotalPrivateClean())));
                 } else {
-                    sb.append(String.format(Locale.US, memInfoFmt, "System:", "~ " + String.valueOf(mi.getTotalPss() - mi.getTotalPrivateDirty())));
+                    sb.append(String.format(Locale.US, memInfoFmt, "System:", "~ " + (mi.getTotalPss() - mi.getTotalPrivateDirty())));
                 }
                 sb.append(String.format(Locale.US, memInfoFmt, "TOTAL:", String.valueOf(mi.getTotalPss())));
             }
         } catch (Exception e) {
-            e.printStackTrace();
+            XCrash.getLogger().i(Util.TAG, "Util getProcessMemoryInfo failed", e);
         }
 
         return sb.toString();
+    }
+
+    @SuppressWarnings({"ResultOfMethodCallIgnored", "BooleanMethodIsAlwaysInverted"})
+    static boolean checkAndCreateDir(String path) {
+        File dir = new File(path);
+        try {
+            if (!dir.exists()) {
+                dir.mkdirs();
+                return dir.exists() && dir.isDirectory();
+            } else {
+                return dir.isDirectory();
+            }
+        } catch (Exception ignored) {
+            return false;
+        }
     }
 }
